@@ -23,45 +23,46 @@ DIST = FRONTEND / "dist"
 REQUIREMENTS = ROOT / "requirements.txt"
 
 
-def log(msg: str) -> None:
-    print(f"\n  [setup] {msg}")
+def status(msg: str, end: str = "\n") -> None:
+    print(f"  {msg}", end=end, flush=True)
 
 
 def install_python_deps() -> None:
-    log("Checking Python dependencies...")
+    status("Installing Python packages...  ", end="")
     subprocess.check_call(
         [sys.executable, "-m", "pip", "install", "-q", "-r", str(REQUIREMENTS)],
         stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-    log("Python dependencies ready.")
+    print("done")
 
 
 def install_and_build_frontend() -> None:
     if shutil.which("npm") is None:
-        print("\n  [error] Node.js / npm is not installed.")
-        print("          Download it from https://nodejs.org and re-run this script.")
+        print("\n  Node.js is not installed.")
+        print("  Download it from https://nodejs.org and re-run this script.")
         sys.exit(1)
 
     if not (FRONTEND / "node_modules").is_dir():
-        log("Installing frontend dependencies (first run only)...")
+        status("Installing frontend packages...  ", end="")
         subprocess.check_call(["npm", "install"], cwd=str(FRONTEND), shell=True,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("done")
 
     if not DIST.is_dir():
-        log("Building frontend (first run only)...")
+        status("Building frontend...  ", end="")
         subprocess.check_call(["npm", "run", "build"], cwd=str(FRONTEND), shell=True,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    log("Frontend ready.")
+        print("done")
 
 
 def ensure_model() -> None:
     model = ROOT / "yolov8n.pt"
     if not model.exists():
-        log("Downloading YOLOv8n model (first run only, ~6 MB)...")
+        status("Downloading detection model (~6 MB)...  ", end="")
         from ultralytics import YOLO
         YOLO("yolov8n.pt")
-        log("Model downloaded.")
+        print("done")
 
 
 def start_server() -> None:
@@ -78,21 +79,36 @@ def start_server() -> None:
 
     threading.Thread(target=_open_browser, daemon=True).start()
 
-    log(f"Starting server at http://{host}:{port}")
-    print("         Press Ctrl+C to stop.\n")
+    status(f"Starting server...  done")
+    print()
+    print(f"  App is running at http://{host}:{port}")
+    print(f"  Your browser should open automatically.")
+    print()
+    print(f"  Press Ctrl+C to stop.")
+    print()
 
     import uvicorn
-    uvicorn.run("backend.app:app", host=host, port=port, log_level="info")
+    uvicorn.run("backend.app:app", host=host, port=port, log_level="warning")
 
 
 def main() -> None:
-    print("\n  ====================================")
-    print("   Person Detection System v2.0")
-    print("  ====================================")
+    print()
+    print("  ======================================")
+    print("    Person Detection System v2.0")
+    print("  ======================================")
+    print()
 
     install_python_deps()
     install_and_build_frontend()
     ensure_model()
+
+    status("Loading detection model...  ", end="")
+    # force-import so the model loads before we say "done"
+    from backend.detector import DetectionEngine
+    DetectionEngine()
+    print("done")
+    print()
+
     start_server()
 
 

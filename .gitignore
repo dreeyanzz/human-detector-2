@@ -9,3 +9,6 @@ screenshots/*.jpg
 .env
 .claude/settings.local.json
 *.tsbuildinfo
+build/
+dist/
+*.spec

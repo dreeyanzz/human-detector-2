@@ -5,6 +5,7 @@ Extracted from the original gui_detector.py tkinter application.
 Designed to be driven by FastAPI route handlers.
 """
 
+import sys
 import cv2
 import threading
 import time
@@ -20,10 +21,25 @@ _COLORS = [
     (150, 0, 255), (0, 200, 100), (100, 255, 0),
 ]
 
-SCREENSHOT_DIR = Path(__file__).resolve().parent.parent / "screenshots"
+
+def _base_dir() -> Path:
+    """Return project root — works both normally and inside a PyInstaller bundle."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parent.parent
+
+
+def _writable_dir() -> Path:
+    """Writable directory next to the exe (frozen) or project root (dev)."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+SCREENSHOT_DIR = _writable_dir() / "screenshots"
 SCREENSHOT_DIR.mkdir(exist_ok=True)
 
-MODEL_DIR = Path(__file__).resolve().parent.parent
+MODEL_DIR = _base_dir()
 
 
 class DetectionEngine:
