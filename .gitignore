@@ -8,3 +8,4 @@ screenshots/*.jpg
 *.pt
 .env
 .claude/settings.local.json
+*.tsbuildinfo
