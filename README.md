@@ -1,55 +1,81 @@
 # Person Detection System v2.0
 
-Real-time person detection and tracking using YOLOv8, served as a web application with a React frontend and FastAPI backend.
+Real-time person detection and tracking powered by YOLOv8. A modern web application with a React frontend and FastAPI backend, packaged as a standalone Windows executable for easy distribution.
+
+## Features
+
+- **Live Video Detection** -- Real-time person detection from webcam with bounding boxes, tracking IDs, and confidence scores
+- **Person Tracking** -- ByteTrack algorithm assigns persistent IDs across frames, counts unique individuals
+- **Adjustable Settings** -- Confidence threshold slider, model selection (fast vs. accurate), display toggles
+- **Screenshot Capture** -- Save annotated frames as JPEG with one click, browse in a built-in gallery
+- **Session Statistics** -- Live people count, total unique individuals, FPS, and session duration
+- **Standalone Distribution** -- Package as a single-folder Windows executable -- no installs required for customers
 
 ## Quick Start
 
+### For Developers
+
 ```bash
+# Install Python dependencies
 pip install -r requirements.txt
+
+# Install frontend dependencies and start
+cd frontend && npm install && cd ..
+
+# Run the app (builds frontend automatically if needed)
 python run.py
 ```
 
-This installs dependencies, builds the frontend (if needed), and opens the app at `http://localhost:8000`.
+The app opens at **http://localhost:8000**.
 
-## Prerequisites
+### For Customers
 
-- Python 3.10+
-- Node.js 18+ (for building the frontend)
-- A webcam
+Double-click `PersonDetector.exe`. The browser opens automatically. That's it.
 
-## Development
-
-Run the backend and frontend dev server separately for hot-reload:
-
-```bash
-# Terminal 1 — backend
-uvicorn backend.app:app --reload --port 8000
-
-# Terminal 2 — frontend (proxies /api to backend)
-cd frontend && npm run dev
-```
-
-## API
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/api/stream` | MJPEG video stream |
-| POST | `/api/start` | Start detection |
-| POST | `/api/pause` | Toggle pause/resume |
-| POST | `/api/stop` | Stop detection |
-| GET | `/api/stats` | Current stats |
-| GET/PUT | `/api/settings` | Get/update settings |
-| POST | `/api/screenshot` | Take screenshot |
-| GET | `/api/screenshots` | List screenshots |
-| GET | `/api/screenshots/{name}` | Serve screenshot file |
+See [DEPLOYMENT.md](DEPLOYMENT.md) for how to build and distribute the exe.
 
 ## Project Structure
 
 ```
-backend/          FastAPI server + detection engine
-frontend/         React + Vite + Tailwind CSS
-screenshots/      Saved detection screenshots
-run.py            Single-command launcher
-yolov8n.pt        YOLOv8 nano model (auto-downloads)
-yolov8m.pt        YOLOv8 medium model (optional)
+human-detector-2/
+├── backend/                 # FastAPI server + detection engine
+│   ├── app.py              # FastAPI app, serves API + static frontend
+│   ├── detector.py          # DetectionEngine class (YOLO + ByteTrack)
+│   └── routes/              # API route handlers
+├── frontend/                # React + Vite + Tailwind CSS
+│   └── src/
+│       ├── components/      # UI components (VideoFeed, StatsPanel, etc.)
+│       └── hooks/           # React hooks (useStats, useSettings)
+├── screenshots/             # Saved detection screenshots
+├── run.py                   # Dev launcher (auto-installs everything)
+├── run_exe.py               # Frozen exe entry point
+├── build.py                 # Build script for PyInstaller exe
+├── requirements.txt         # Python dependencies
+├── yolov8n.pt               # YOLOv8 nano model (~6 MB)
+└── yolov8m.pt               # YOLOv8 medium model (~52 MB, optional)
 ```
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System design, data flow, threading model, design decisions |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | Developer setup, how to add features, debugging guide |
+| [API.md](API.md) | Full REST API reference with examples |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Building the exe, distributing to customers, troubleshooting |
+| [CLAUDE.md](CLAUDE.md) | AI assistant context for Claude Code |
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Detection | YOLOv8 (Ultralytics) + ByteTrack |
+| Computer Vision | OpenCV |
+| Backend | FastAPI + Uvicorn |
+| Frontend | React 19 + TypeScript + Tailwind CSS |
+| Build Tool | Vite |
+| Packaging | PyInstaller |
+
+## License
+
+Proprietary. All rights reserved.
