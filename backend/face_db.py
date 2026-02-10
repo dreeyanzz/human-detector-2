@@ -113,6 +113,27 @@ def _detect_and_encode(rgb: np.ndarray, model: str = "hog"):
     return locations, encoding, gpu_failed
 
 
+def _recognize_worker(crop, tolerance, encodings_snapshot):
+    """Run face recognition in a separate process (isolates native crashes)."""
+    rgb = _prepare_rgb(crop)
+    _, encoding, _ = _detect_and_encode(rgb)
+    if encoding is None:
+        return None
+    if not encodings_snapshot:
+        return None
+    all_names: list[str] = []
+    all_encs: list[np.ndarray] = []
+    for person_name, encs in encodings_snapshot.items():
+        for enc in encs:
+            all_names.append(person_name)
+            all_encs.append(enc)
+    distances = face_recognition.face_distance(all_encs, encoding)
+    best_idx = int(np.argmin(distances))
+    if distances[best_idx] <= tolerance:
+        return all_names[best_idx]
+    return None
+
+
 class FaceDatabase:
     """Persistent face encoding database."""
 
@@ -194,6 +215,13 @@ class FaceDatabase:
     # Listing / deletion
     # ------------------------------------------------------------------
 
+    def get_encodings_snapshot(self) -> dict[str, list[np.ndarray]]:
+        """Return a shallow copy of encodings for cross-process use."""
+        with self._lock:
+            if not self._encodings:
+                return {}
+            return {k: list(v) for k, v in self._encodings.items()}
+
     def list_people(self) -> list[dict]:
         with self._lock:
             return [
@@ -208,3 +236,41 @@ class FaceDatabase:
             del self._encodings[name]
             self._save()
         return {"status": "ok", "name": name}
+
+    # ------------------------------------------------------------------
+    # Export / Import
+    # ------------------------------------------------------------------
+
+    def export_bytes(self) -> bytes:
+        """Serialize the entire face database to pickle bytes."""
+        with self._lock:
+            return pickle.dumps(self._encodings)
+
+    def import_bytes(self, data: bytes, merge: bool) -> dict:
+        """Import face encodings from pickle bytes.
+
+        If *merge* is True, new names are added and existing names get their
+        sample lists extended.  If False, the database is replaced entirely.
+        """
+        imported = pickle.loads(data)
+        if not isinstance(imported, dict):
+            return {"status": "error", "message": "Invalid face database format"}
+        for key, val in imported.items():
+            if not isinstance(key, str) or not isinstance(val, list):
+                return {"status": "error", "message": "Invalid face database format"}
+
+        with self._lock:
+            if merge:
+                for person_name, encodings in imported.items():
+                    self._encodings.setdefault(person_name, []).extend(encodings)
+            else:
+                self._encodings = imported
+            self._save()
+            imported_names = sorted(imported.keys())
+            total_people = len(self._encodings)
+
+        return {
+            "status": "ok",
+            "imported_names": imported_names,
+            "total_people": total_people,
+        }

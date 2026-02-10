@@ -1,9 +1,11 @@
+import asyncio
 import io
 
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
 from fastapi import APIRouter, UploadFile, File, Form, Query
+from fastapi.responses import Response
 
 from backend.detector import DetectionEngine
 
@@ -29,7 +31,7 @@ def create_router(engine: DetectionEngine) -> APIRouter:
 
     @router.get("/faces/gpu")
     def gpu_info():
-        return {"has_gpu": engine.face_has_gpu()}
+        return engine.gpu_info()
 
     @router.post("/faces/upload")
     async def upload_face(
@@ -45,12 +47,30 @@ def create_router(engine: DetectionEngine) -> APIRouter:
         bgr = _decode_upload(data)
         if bgr is None:
             return {"status": "error", "message": f"{files[0].filename}: could not decode image"}
-        result = engine.enroll_face_from_image(name, bgr, cpu_only=force_cpu)
+        result = await asyncio.to_thread(engine.enroll_face_from_image, name, bgr, force_cpu)
         result.setdefault("filename", files[0].filename)
         return result
 
     @router.delete("/faces/{name}")
     def delete_face(name: str):
         return engine.delete_face(name)
+
+    @router.get("/faces/export")
+    def export_face_db():
+        data = engine.export_face_db()
+        return Response(
+            content=data,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": 'attachment; filename="face_db.pkl"'},
+        )
+
+    @router.post("/faces/import")
+    async def import_face_db(
+        file: UploadFile = File(...),
+        merge: str = Form("true"),
+    ):
+        data = await file.read()
+        do_merge = merge.lower() in ("true", "1", "yes")
+        return engine.import_face_db(data, do_merge)
 
     return router

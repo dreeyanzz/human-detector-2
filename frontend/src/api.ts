@@ -56,7 +56,12 @@ export interface EnrollResult {
   filename?: string;
 }
 export const fetchFaces = () => json<FacePerson[]>(fetch(`${BASE}/faces`));
-export const fetchGpuInfo = () => json<{ has_gpu: boolean }>(fetch(`${BASE}/faces/gpu`));
+export interface GpuInfo {
+  has_gpu: boolean;
+  pytorch_cuda: boolean;
+  dlib_cuda: boolean;
+}
+export const fetchGpuInfo = () => json<GpuInfo>(fetch(`${BASE}/faces/gpu`));
 export const uploadFacePhoto = (name: string, file: File, cpuOnly = false) => {
   const form = new FormData();
   form.append("name", name);
@@ -68,6 +73,33 @@ export const uploadFacePhoto = (name: string, file: File, cpuOnly = false) => {
 };
 export const deleteFace = (name: string) =>
   json<{ status: string }>(fetch(`${BASE}/faces/${encodeURIComponent(name)}`, { method: "DELETE" }));
+
+export async function exportFaceDb(): Promise<void> {
+  const res = await fetch(`${BASE}/faces/export`);
+  if (!res.ok) throw new ApiError(res.status, "Export failed");
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "face_db.pkl";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export interface ImportResult {
+  status: string;
+  imported_names?: string[];
+  total_people?: number;
+  message?: string;
+}
+export function importFaceDb(file: File, merge: boolean): Promise<ImportResult> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("merge", merge ? "true" : "false");
+  return json<ImportResult>(
+    fetch(`${BASE}/faces/import`, { method: "POST", body: form })
+  );
+}
 
 // Stream URL (not a fetch — used as <img> src)
 export const streamUrl = (cacheBust: number) => `${BASE}/stream?t=${cacheBust}`;

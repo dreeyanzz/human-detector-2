@@ -9,13 +9,14 @@ import sys
 import cv2
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime
 from pathlib import Path
 
 from ultralytics import YOLO
 
-from backend.face_db import FaceDatabase
+from backend.face_db import FaceDatabase, _recognize_worker
 
 # Colors assigned to tracking IDs
 _COLORS = [
@@ -88,7 +89,9 @@ class DetectionEngine:
         self._face_in_flight: set[int] = set()           # track IDs with pending bg jobs
         self._face_attempts: dict[int, int] = {}          # track ID -> attempt count
         self._face_last_attempt: dict[int, float] = {}    # track ID -> timestamp
-        self._face_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="face")
+        self._face_thread_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="face")
+        self._face_proc_pool: ProcessPoolExecutor | None = None
+        self._face_proc_crashes = 0
         _FACE_RETRY_INTERVAL = 1.0   # seconds between retries
         _FACE_MAX_RETRIES = 10
         self._face_retry_interval = _FACE_RETRY_INTERVAL
@@ -266,23 +269,46 @@ class DetectionEngine:
     # Face recognition
     # ------------------------------------------------------------------
 
-    def face_has_gpu(self) -> bool:
+    def gpu_info(self) -> dict:
         from backend.face_db import HAS_GPU
-        return HAS_GPU
+        import torch
+        pytorch_cuda = torch.cuda.is_available()
+        return {
+            "has_gpu": HAS_GPU or pytorch_cuda,
+            "pytorch_cuda": pytorch_cuda,
+            "dlib_cuda": HAS_GPU,
+        }
+
+    def _invalidate_face_cache(self) -> None:
+        """Clear all cached recognition results, forcing re-evaluation."""
+        with self._lock:
+            self._face_cache.clear()
+            self._face_in_flight.clear()
+            self._face_attempts.clear()
+            self._face_last_attempt.clear()
 
     def enroll_face_from_image(self, name: str, bgr_image, cpu_only: bool = False) -> dict:
-        return self._face_db.enroll_from_image(name, bgr_image, cpu_only=cpu_only)
+        result = self._face_db.enroll_from_image(name, bgr_image, cpu_only=cpu_only)
+        if result.get("status") == "ok":
+            self._invalidate_face_cache()
+        return result
 
     def list_faces(self) -> list[dict]:
         return self._face_db.list_people()
 
     def delete_face(self, name: str) -> dict:
         result = self._face_db.delete_person(name)
-        # Clear cached entries for deleted person
-        with self._lock:
-            self._face_cache = {
-                tid: n for tid, n in self._face_cache.items() if n != name
-            }
+        if result.get("status") == "ok":
+            self._invalidate_face_cache()
+        return result
+
+    def export_face_db(self) -> bytes:
+        return self._face_db.export_bytes()
+
+    def import_face_db(self, data: bytes, merge: bool) -> dict:
+        result = self._face_db.import_bytes(data, merge)
+        if result.get("status") == "ok":
+            self._invalidate_face_cache()
         return result
 
     # ------------------------------------------------------------------
@@ -314,119 +340,160 @@ class DetectionEngine:
         prev_time = time.time()
 
         while True:
-            with self._lock:
-                if not self._running:
-                    break
-                if self._paused:
-                    continue
-                cap = self._cap
-                conf = self._confidence
-                show_labels = self._show_labels
-                show_conf = self._show_confidence
-                face_enabled = self._face_recognition_enabled
-                face_tolerance = self._face_recognition_tolerance
-
-            if cap is None:
-                break
-
-            ret, frame = cap.read()
-            if not ret:
+            try:
                 with self._lock:
-                    self._running = False
-                break
+                    if not self._running:
+                        break
+                    if self._paused:
+                        continue
+                    cap = self._cap
+                    conf = self._confidence
+                    show_labels = self._show_labels
+                    show_conf = self._show_confidence
+                    face_enabled = self._face_recognition_enabled
+                    face_tolerance = self._face_recognition_tolerance
 
-            # Run YOLO detection (expensive — lock NOT held)
-            results = self._model.track(
-                frame,
-                persist=True,
-                tracker="bytetrack.yaml",
-                conf=conf,
-                classes=[0],
-                verbose=False,
-            )
+                if cap is None:
+                    break
 
-            people_count = 0
-            seen_ids: set[int] = set()
+                ret, frame = cap.read()
+                if not ret:
+                    with self._lock:
+                        self._running = False
+                    break
 
-            if results[0].boxes is not None and len(results[0].boxes):
-                for box in results[0].boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                    confidence = float(box.conf[0])
-                    track_id = int(box.id[0]) if box.id is not None else -1
+                # Run YOLO detection (expensive — lock NOT held)
+                results = self._model.track(
+                    frame,
+                    persist=True,
+                    tracker="bytetrack.yaml",
+                    conf=conf,
+                    classes=[0],
+                    verbose=False,
+                )
 
-                    if track_id >= 0:
-                        seen_ids.add(track_id)
+                people_count = 0
+                seen_ids: set[int] = set()
 
-                    # Face recognition (async, cached per track_id)
-                    recognized_name = None
-                    if face_enabled and track_id >= 0:
-                        if self._face_cache.get(track_id):
-                            recognized_name = self._face_cache[track_id]
-                        else:
-                            now_t = time.time()
-                            in_flight = track_id in self._face_in_flight
-                            attempts = self._face_attempts.get(track_id, 0)
-                            last_attempt = self._face_last_attempt.get(track_id, 0.0)
-                            cooldown_ok = (now_t - last_attempt) >= self._face_retry_interval
+                if results[0].boxes is not None and len(results[0].boxes):
+                    for box in results[0].boxes:
+                        x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                        confidence = float(box.conf[0])
+                        track_id = int(box.id[0]) if box.id is not None else -1
 
-                            if not in_flight and attempts < self._face_max_retries and cooldown_ok:
-                                # Crop and submit to background thread
-                                h, w = frame.shape[:2]
-                                cx1 = max(0, x1)
-                                cy1 = max(0, y1)
-                                cx2 = min(w, x2)
-                                cy2 = min(h, y2)
-                                if cx2 > cx1 and cy2 > cy1:
-                                    crop = frame[cy1:cy2, cx1:cx2].copy()
-                                    self._face_in_flight.add(track_id)
-                                    self._face_attempts[track_id] = attempts + 1
-                                    self._face_last_attempt[track_id] = now_t
-                                    self._face_pool.submit(
-                                        self._recognize_async, track_id, crop, face_tolerance
-                                    )
+                        if track_id >= 0:
+                            seen_ids.add(track_id)
 
-                    people_count += 1
-                    color = _COLORS[track_id % len(_COLORS)]
-                    self._draw_detection(frame, x1, y1, x2, y2, color, track_id, confidence, show_labels, show_conf, recognized_name)
+                        # Face recognition (async, cached per track_id)
+                        recognized_name = None
+                        if face_enabled and track_id >= 0:
+                            try:
+                                if self._face_cache.get(track_id):
+                                    recognized_name = self._face_cache[track_id]
+                                else:
+                                    now_t = time.time()
+                                    in_flight = track_id in self._face_in_flight
+                                    attempts = self._face_attempts.get(track_id, 0)
+                                    last_attempt = self._face_last_attempt.get(track_id, 0.0)
+                                    cooldown_ok = (now_t - last_attempt) >= self._face_retry_interval
 
-            # Encode frame to JPEG
-            _, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            jpeg_bytes = jpeg_buf.tobytes()
+                                    if not in_flight and attempts < self._face_max_retries and cooldown_ok:
+                                        # Crop and submit to background thread
+                                        h, w = frame.shape[:2]
+                                        cx1 = max(0, x1)
+                                        cy1 = max(0, y1)
+                                        cx2 = min(w, x2)
+                                        cy2 = min(h, y2)
+                                        if cx2 > cx1 and cy2 > cy1:
+                                            crop = frame[cy1:cy2, cx1:cx2].copy()
+                                            self._face_in_flight.add(track_id)
+                                            self._face_attempts[track_id] = attempts + 1
+                                            self._face_last_attempt[track_id] = now_t
+                                            self._face_thread_pool.submit(
+                                                self._recognize_async, track_id, crop, face_tolerance
+                                            )
+                            except Exception as e:
+                                print(f"[face-rec] error submitting job for track {track_id}: {e}")
 
-            # Calculate FPS
-            now = time.time()
-            dt = now - prev_time
-            prev_time = now
-            fps = (1.0 / dt) if dt > 0 else 0.0
+                        people_count += 1
+                        color = _COLORS[track_id % len(_COLORS)]
+                        self._draw_detection(frame, x1, y1, x2, y2, color, track_id, confidence, show_labels, show_conf, recognized_name)
 
-            # Write shared state under lock
-            with self._lock:
-                self._people_count = people_count
-                self._all_seen_ids.update(seen_ids)
-                self._total_unique = len(self._all_seen_ids)
-                self._fps = self._fps * 0.8 + fps * 0.2
-                self._raw_frame = frame
-                self._jpeg_frame = jpeg_bytes
+                # Encode frame to JPEG
+                _, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                jpeg_bytes = jpeg_buf.tobytes()
 
-            # Signal waiting MJPEG generators
-            self._frame_event.set()
+                # Calculate FPS
+                now = time.time()
+                dt = now - prev_time
+                prev_time = now
+                fps = (1.0 / dt) if dt > 0 else 0.0
 
-            # small sleep when paused to avoid busy-loop
-            with self._lock:
-                if self._paused:
-                    time.sleep(0.1)
+                # Write shared state under lock
+                with self._lock:
+                    self._people_count = people_count
+                    self._all_seen_ids.update(seen_ids)
+                    self._total_unique = len(self._all_seen_ids)
+                    self._fps = self._fps * 0.8 + fps * 0.2
+                    self._raw_frame = frame
+                    self._jpeg_frame = jpeg_bytes
+
+                # Signal waiting MJPEG generators
+                self._frame_event.set()
+
+                # small sleep when paused to avoid busy-loop
+                with self._lock:
+                    if self._paused:
+                        time.sleep(0.1)
+
+            except Exception as e:
+                print(f"[detection-loop] error: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(0.1)
 
     # ------------------------------------------------------------------
     # Async face recognition
     # ------------------------------------------------------------------
 
+    def _get_face_proc_pool(self) -> ProcessPoolExecutor | None:
+        """Return the face recognition process pool, creating it lazily.
+
+        Returns None if face recognition has crashed too many times (>=3).
+        """
+        if self._face_proc_crashes >= 3:
+            return None
+        if self._face_proc_pool is None:
+            self._face_proc_pool = ProcessPoolExecutor(max_workers=1)
+        return self._face_proc_pool
+
     def _recognize_async(self, track_id: int, crop, tolerance: float) -> None:
-        """Run face recognition in a background thread and update the cache."""
+        """Run face recognition in a separate process and update the cache."""
         try:
-            name = self._face_db.recognize(crop, tolerance=tolerance)
+            pool = self._get_face_proc_pool()
+            if pool is None:
+                return
+
+            encodings = self._face_db.get_encodings_snapshot()
+            if not encodings:
+                return
+
+            future = pool.submit(_recognize_worker, crop, tolerance, encodings)
+            name = future.result(timeout=30)
             if name:
                 with self._lock:
                     self._face_cache[track_id] = name
+            # Reset crash counter on success
+            self._face_proc_crashes = 0
+        except BrokenProcessPool:
+            self._face_proc_crashes += 1
+            self._face_proc_pool = None
+            print(f"[face-rec] worker process crashed (attempt {self._face_proc_crashes}/3)", flush=True)
+            if self._face_proc_crashes >= 3:
+                print("[face-rec] face recognition disabled — dlib keeps crashing", flush=True)
+                print("[face-rec] this usually means dlib is incompatible with your Python version", flush=True)
+        except Exception as e:
+            print(f"[face-rec] error for track {track_id}: {e}", flush=True)
         finally:
             with self._lock:
                 self._face_in_flight.discard(track_id)

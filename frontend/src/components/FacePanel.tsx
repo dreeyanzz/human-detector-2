@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useFaces } from "../hooks/useFaces";
-import { uploadFacePhoto, deleteFace, fetchGpuInfo } from "../api";
+import { uploadFacePhoto, deleteFace, fetchGpuInfo, exportFaceDb, importFaceDb } from "../api";
 import type { EnrollResult } from "../api";
 import { useToast } from "./ui/useToast";
 import Modal from "./ui/Modal";
@@ -14,6 +14,8 @@ export default function FacePanel() {
   const [busy, setBusy] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [hasGpu, setHasGpu] = useState(false);
+  const [gpuInfo, setGpuInfo] = useState<{ pytorch_cuda: boolean; dlib_cuda: boolean } | null>(null);
+  const [gpuHintDismissed, setGpuHintDismissed] = useState(() => sessionStorage.getItem("gpu-hint-dismissed") === "1");
   const [gpuPrompt, setGpuPrompt] = useState<{
     remaining: File[];
     enrolled: number;
@@ -23,9 +25,13 @@ export default function FacePanel() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const importRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    fetchGpuInfo().then((r) => setHasGpu(r.has_gpu)).catch(() => {});
+    fetchGpuInfo().then((r) => {
+      setHasGpu(r.has_gpu);
+      setGpuInfo({ pytorch_cuda: r.pytorch_cuda, dlib_cuda: r.dlib_cuda });
+    }).catch(() => {});
   }, []);
 
   const processFiles = useCallback(async (files: File[]) => {
@@ -125,12 +131,95 @@ export default function FacePanel() {
     setDeleteTarget(null);
   };
 
+  const handleExport = async () => {
+    try {
+      await exportFaceDb();
+      toast.success("Face database exported");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Export failed");
+    }
+  };
+
+  const handleImport = async (file: File) => {
+    try {
+      const result = await importFaceDb(file, true);
+      if (result.status === "ok") {
+        toast.success(`Imported ${result.imported_names?.length ?? 0} person(s)`);
+        refresh();
+      } else {
+        toast.error(result.message ?? "Import failed");
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Import failed");
+    }
+  };
+
   return (
     <div className="space-y-2.5">
-      {/* GPU badge */}
-      {hasGpu && (
-        <span className="text-[10px] text-green-400 bg-green-400/10 px-1.5 py-0.5 rounded-full">GPU</span>
+      {/* GPU badge + export/import buttons */}
+      <div className="flex items-center gap-2">
+        <span
+          className={`text-[10px] px-1.5 py-0.5 rounded-full ${hasGpu ? "text-green-400 bg-green-400/10" : "text-yellow-400 bg-yellow-400/10"}`}
+          title={gpuInfo ? `Detection (PyTorch): ${gpuInfo.pytorch_cuda ? "GPU" : "CPU"}\nFace Recognition (dlib): ${gpuInfo.dlib_cuda ? "GPU" : "CPU"}` : ""}
+        >
+          {hasGpu ? "GPU" : "CPU"}
+        </span>
+        <div className="ml-auto flex gap-1">
+          <button
+            onClick={handleExport}
+            disabled={faces.length === 0}
+            title="Export face database"
+            className="p-1.5 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-accent hover:border-gray-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V3" />
+            </svg>
+          </button>
+          <button
+            onClick={() => importRef.current?.click()}
+            title="Import face database"
+            className="p-1.5 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-accent hover:border-gray-600 transition-colors"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M16 6l-4-4m0 0L8 6m4-4v13" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* GPU hint */}
+      {gpuInfo && !gpuInfo.pytorch_cuda && !gpuHintDismissed && (
+        <div className="flex items-start gap-2 px-2.5 py-2 rounded-lg bg-yellow-900/30 border border-yellow-700/30">
+          <svg className="w-3.5 h-3.5 text-yellow-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M12 3l9.66 16.5H2.34L12 3z" />
+          </svg>
+          <div className="flex-1 min-w-0">
+            <p className="text-[10px] text-yellow-300/90 leading-relaxed">
+              Running on CPU. Install <a href="https://pytorch.org/get-started/locally/" target="_blank" rel="noopener noreferrer" className="text-accent underline">PyTorch with CUDA</a> for faster detection.
+            </p>
+          </div>
+          <button
+            onClick={() => { setGpuHintDismissed(true); sessionStorage.setItem("gpu-hint-dismissed", "1"); }}
+            className="text-yellow-400/50 hover:text-yellow-300 transition-colors shrink-0 mt-0.5"
+          >
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
       )}
+
+      <input
+        ref={importRef}
+        type="file"
+        accept=".pkl"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) handleImport(f);
+          e.target.value = "";
+        }}
+      />
 
       {/* Name input + drop zone row */}
       <input
