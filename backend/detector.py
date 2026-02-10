@@ -9,6 +9,7 @@ import sys
 import cv2
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -84,6 +85,14 @@ class DetectionEngine:
         self._face_recognition_enabled = False
         self._face_recognition_tolerance = 0.6
         self._face_cache: dict[int, str | None] = {}
+        self._face_in_flight: set[int] = set()           # track IDs with pending bg jobs
+        self._face_attempts: dict[int, int] = {}          # track ID -> attempt count
+        self._face_last_attempt: dict[int, float] = {}    # track ID -> timestamp
+        self._face_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="face")
+        _FACE_RETRY_INTERVAL = 1.0   # seconds between retries
+        _FACE_MAX_RETRIES = 10
+        self._face_retry_interval = _FACE_RETRY_INTERVAL
+        self._face_max_retries = _FACE_MAX_RETRIES
 
         # model (loaded once, reloaded on model change)
         self._model: YOLO | None = None
@@ -124,6 +133,9 @@ class DetectionEngine:
             self._session_start = time.time()
             self._jpeg_frame = None
             self._face_cache = {}
+            self._face_in_flight = set()
+            self._face_attempts = {}
+            self._face_last_attempt = {}
 
         # start detection in a daemon thread
         self._thread = threading.Thread(target=self._detection_loop, daemon=True)
@@ -155,6 +167,9 @@ class DetectionEngine:
             self._session_start = None
             self._jpeg_frame = None
             self._face_cache = {}
+            self._face_in_flight = set()
+            self._face_attempts = {}
+            self._face_last_attempt = {}
             # signal any waiting generator
             self._frame_event.set()
             return summary
@@ -255,14 +270,6 @@ class DetectionEngine:
         from backend.face_db import HAS_GPU
         return HAS_GPU
 
-    def enroll_face_from_camera(self, name: str, cpu_only: bool = False) -> dict:
-        """Capture current frame and enroll a face under *name*."""
-        with self._lock:
-            if self._raw_frame is None:
-                return {"status": "error", "message": "No frame available — start detection first"}
-            frame = self._raw_frame.copy()
-        return self._face_db.enroll_from_image(name, frame, cpu_only=cpu_only)
-
     def enroll_face_from_image(self, name: str, bgr_image, cpu_only: bool = False) -> dict:
         return self._face_db.enroll_from_image(name, bgr_image, cpu_only=cpu_only)
 
@@ -350,22 +357,33 @@ class DetectionEngine:
                     if track_id >= 0:
                         seen_ids.add(track_id)
 
-                    # Face recognition (cached per track_id)
+                    # Face recognition (async, cached per track_id)
                     recognized_name = None
                     if face_enabled and track_id >= 0:
-                        if track_id in self._face_cache:
+                        if self._face_cache.get(track_id):
                             recognized_name = self._face_cache[track_id]
                         else:
-                            # Crop person region and attempt recognition
-                            h, w = frame.shape[:2]
-                            cx1 = max(0, x1)
-                            cy1 = max(0, y1)
-                            cx2 = min(w, x2)
-                            cy2 = min(h, y2)
-                            if cx2 > cx1 and cy2 > cy1:
-                                crop = frame[cy1:cy2, cx1:cx2]
-                                recognized_name = self._face_db.recognize(crop, tolerance=face_tolerance)
-                            self._face_cache[track_id] = recognized_name
+                            now_t = time.time()
+                            in_flight = track_id in self._face_in_flight
+                            attempts = self._face_attempts.get(track_id, 0)
+                            last_attempt = self._face_last_attempt.get(track_id, 0.0)
+                            cooldown_ok = (now_t - last_attempt) >= self._face_retry_interval
+
+                            if not in_flight and attempts < self._face_max_retries and cooldown_ok:
+                                # Crop and submit to background thread
+                                h, w = frame.shape[:2]
+                                cx1 = max(0, x1)
+                                cy1 = max(0, y1)
+                                cx2 = min(w, x2)
+                                cy2 = min(h, y2)
+                                if cx2 > cx1 and cy2 > cy1:
+                                    crop = frame[cy1:cy2, cx1:cx2].copy()
+                                    self._face_in_flight.add(track_id)
+                                    self._face_attempts[track_id] = attempts + 1
+                                    self._face_last_attempt[track_id] = now_t
+                                    self._face_pool.submit(
+                                        self._recognize_async, track_id, crop, face_tolerance
+                                    )
 
                     people_count += 1
                     color = _COLORS[track_id % len(_COLORS)]
@@ -397,6 +415,21 @@ class DetectionEngine:
             with self._lock:
                 if self._paused:
                     time.sleep(0.1)
+
+    # ------------------------------------------------------------------
+    # Async face recognition
+    # ------------------------------------------------------------------
+
+    def _recognize_async(self, track_id: int, crop, tolerance: float) -> None:
+        """Run face recognition in a background thread and update the cache."""
+        try:
+            name = self._face_db.recognize(crop, tolerance=tolerance)
+            if name:
+                with self._lock:
+                    self._face_cache[track_id] = name
+        finally:
+            with self._lock:
+                self._face_in_flight.discard(track_id)
 
     # ------------------------------------------------------------------
     # Drawing helpers

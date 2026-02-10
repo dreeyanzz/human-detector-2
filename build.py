@@ -10,6 +10,7 @@ Output:
 The customer receives the dist/PersonDetector folder — just run the exe.
 """
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -103,6 +104,8 @@ def main() -> None:
         "--hidden-import", "PIL.Image",
         "--hidden-import", "PIL.ImageOps",
         "--hidden-import", "PIL.ExifTags",
+        "--hidden-import", "setuptools",
+        "--hidden-import", "pkg_resources",
         # Collect data files (models, configs)
         "--collect-data", "ultralytics",
         "--collect-data", "face_recognition_models",
@@ -113,11 +116,20 @@ def main() -> None:
     subprocess.check_call(cmd, cwd=str(ROOT))
 
     print()
+    output = ROOT / "dist" / "PersonDetector"
+
+    # 5. Create zip archive
+    step("Creating zip archive...  ", end="")
+    zip_path = ROOT / "dist" / "PersonDetector"
+    shutil.make_archive(str(zip_path), "zip", root_dir=str(ROOT / "dist"), base_dir="PersonDetector")
+    print("done")
+
+    print()
     step("Build complete!")
     print()
-    output = ROOT / "dist" / "PersonDetector"
     step(f"Output: {output}")
     step(f"Run:    {output / 'PersonDetector.exe'}")
+    step(f"Zip:    {zip_path}.zip")
     print()
 
 

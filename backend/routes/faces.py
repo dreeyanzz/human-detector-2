@@ -31,14 +31,6 @@ def create_router(engine: DetectionEngine) -> APIRouter:
     def gpu_info():
         return {"has_gpu": engine.face_has_gpu()}
 
-    @router.post("/faces/enroll")
-    def enroll_from_camera(body: dict):
-        name = body.get("name", "").strip()
-        if not name:
-            return {"status": "error", "message": "Name is required"}
-        cpu_only = body.get("cpu_only", False)
-        return engine.enroll_face_from_camera(name, cpu_only=cpu_only)
-
     @router.post("/faces/upload")
     async def upload_face(
         name: str = Form(...),
