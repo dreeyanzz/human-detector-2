@@ -70,6 +70,41 @@ export default function SettingsPanel({ settings, onUpdate }: Props) {
         </label>
       </div>
 
+      {/* Face Recognition */}
+      <div>
+        <span className="text-sm text-gray-300 block mb-2">Face Recognition</span>
+        <label className="flex items-center gap-2 text-sm py-1 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={settings.face_recognition_enabled}
+            onChange={(e) => onUpdate({ face_recognition_enabled: e.target.checked })}
+            className="accent-cyan-400"
+          />
+          <span className="text-gray-300">Enable Face Recognition</span>
+        </label>
+        {settings.face_recognition_enabled && (
+          <div className="mt-2">
+            <div className="flex justify-between text-sm mb-1">
+              <span className="text-gray-400">Tolerance</span>
+              <span className="text-accent font-mono">{settings.face_recognition_tolerance.toFixed(2)}</span>
+            </div>
+            <input
+              type="range"
+              min={0.3}
+              max={0.8}
+              step={0.05}
+              value={settings.face_recognition_tolerance}
+              onChange={(e) => onUpdate({ face_recognition_tolerance: parseFloat(e.target.value) })}
+              className="w-full accent-cyan-400"
+            />
+            <div className="flex justify-between text-xs text-gray-500 mt-0.5">
+              <span>Strict</span>
+              <span>Lenient</span>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Camera index */}
       <div>
         <span className="text-sm text-gray-300 block mb-2">Camera</span>

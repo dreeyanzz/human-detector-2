@@ -5,6 +5,7 @@ import ControlBar from "./components/ControlBar";
 import StatsPanel from "./components/StatsPanel";
 import SettingsPanel from "./components/SettingsPanel";
 import ScreenshotGallery from "./components/ScreenshotGallery";
+import FacePanel from "./components/FacePanel";
 import { useStats } from "./hooks/useStats";
 import { useSettings } from "./hooks/useSettings";
 
@@ -41,6 +42,9 @@ export default function App() {
         <StatsPanel stats={stats} />
         <div className="bg-gray-900 rounded-xl p-4">
           <SettingsPanel settings={settings} onUpdate={update} />
+        </div>
+        <div className="bg-gray-900 rounded-xl p-4">
+          <FacePanel running={stats.running} />
         </div>
         <div className="bg-gray-900 rounded-xl p-4">
           <ScreenshotGallery />

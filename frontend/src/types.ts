@@ -14,9 +14,16 @@ export interface Settings {
   model_name: string;
   show_labels: boolean;
   show_confidence: boolean;
+  face_recognition_enabled: boolean;
+  face_recognition_tolerance: number;
 }
 
 export interface Screenshot {
   name: string;
   size: number;
+}
+
+export interface FacePerson {
+  name: string;
+  sample_count: number;
 }

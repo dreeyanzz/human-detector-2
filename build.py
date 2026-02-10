@@ -92,8 +92,20 @@ def main() -> None:
         "--hidden-import", "backend.routes.settings",
         "--hidden-import", "backend.routes.stats",
         "--hidden-import", "backend.routes.screenshots",
-        # Collect ultralytics config files (tracker yamls, etc.)
+        "--hidden-import", "backend.routes.faces",
+        "--hidden-import", "backend.face_db",
+        "--hidden-import", "face_recognition",
+        "--hidden-import", "face_recognition_models",
+        "--hidden-import", "dlib",
+        "--hidden-import", "python_multipart",
+        "--hidden-import", "multipart",
+        "--hidden-import", "PIL",
+        "--hidden-import", "PIL.Image",
+        "--hidden-import", "PIL.ImageOps",
+        "--hidden-import", "PIL.ExifTags",
+        # Collect data files (models, configs)
         "--collect-data", "ultralytics",
+        "--collect-data", "face_recognition_models",
         # Entry point
         "run_exe.py",
     ]

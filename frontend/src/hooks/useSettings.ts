@@ -8,6 +8,8 @@ const DEFAULT_SETTINGS: Settings = {
   model_name: "yolov8n.pt",
   show_labels: true,
   show_confidence: true,
+  face_recognition_enabled: false,
+  face_recognition_tolerance: 0.6,
 };
 
 export function useSettings() {

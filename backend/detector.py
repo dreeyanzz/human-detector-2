@@ -14,6 +14,8 @@ from pathlib import Path
 
 from ultralytics import YOLO
 
+from backend.face_db import FaceDatabase
+
 # Colors assigned to tracking IDs
 _COLORS = [
     (0, 255, 100), (255, 100, 0), (0, 100, 255),
@@ -77,6 +79,12 @@ class DetectionEngine:
         # raw BGR frame for screenshots
         self._raw_frame = None
 
+        # face recognition
+        self._face_db = FaceDatabase(_writable_dir() / "faces")
+        self._face_recognition_enabled = False
+        self._face_recognition_tolerance = 0.6
+        self._face_cache: dict[int, str | None] = {}
+
         # model (loaded once, reloaded on model change)
         self._model: YOLO | None = None
         self._load_model()
@@ -115,6 +123,7 @@ class DetectionEngine:
             self._fps = 0.0
             self._session_start = time.time()
             self._jpeg_frame = None
+            self._face_cache = {}
 
         # start detection in a daemon thread
         self._thread = threading.Thread(target=self._detection_loop, daemon=True)
@@ -145,6 +154,7 @@ class DetectionEngine:
             }
             self._session_start = None
             self._jpeg_frame = None
+            self._face_cache = {}
             # signal any waiting generator
             self._frame_event.set()
             return summary
@@ -183,6 +193,8 @@ class DetectionEngine:
                 "model_name": self._model_name,
                 "show_labels": self._show_labels,
                 "show_confidence": self._show_confidence,
+                "face_recognition_enabled": self._face_recognition_enabled,
+                "face_recognition_tolerance": self._face_recognition_tolerance,
             }
 
     def update_settings(self, data: dict) -> dict:
@@ -201,6 +213,10 @@ class DetectionEngine:
                 if new_model != self._model_name:
                     self._model_name = new_model
                     reload_model = True
+            if "face_recognition_enabled" in data:
+                self._face_recognition_enabled = bool(data["face_recognition_enabled"])
+            if "face_recognition_tolerance" in data:
+                self._face_recognition_tolerance = max(0.3, min(0.8, float(data["face_recognition_tolerance"])))
 
         if reload_model:
             self._load_model()
@@ -230,6 +246,37 @@ class DetectionEngine:
     def list_screenshots(self) -> list[dict]:
         files = sorted(SCREENSHOT_DIR.glob("*.jpg"), reverse=True)
         return [{"name": f.name, "size": f.stat().st_size} for f in files]
+
+    # ------------------------------------------------------------------
+    # Face recognition
+    # ------------------------------------------------------------------
+
+    def face_has_gpu(self) -> bool:
+        from backend.face_db import HAS_GPU
+        return HAS_GPU
+
+    def enroll_face_from_camera(self, name: str, cpu_only: bool = False) -> dict:
+        """Capture current frame and enroll a face under *name*."""
+        with self._lock:
+            if self._raw_frame is None:
+                return {"status": "error", "message": "No frame available — start detection first"}
+            frame = self._raw_frame.copy()
+        return self._face_db.enroll_from_image(name, frame, cpu_only=cpu_only)
+
+    def enroll_face_from_image(self, name: str, bgr_image, cpu_only: bool = False) -> dict:
+        return self._face_db.enroll_from_image(name, bgr_image, cpu_only=cpu_only)
+
+    def list_faces(self) -> list[dict]:
+        return self._face_db.list_people()
+
+    def delete_face(self, name: str) -> dict:
+        result = self._face_db.delete_person(name)
+        # Clear cached entries for deleted person
+        with self._lock:
+            self._face_cache = {
+                tid: n for tid, n in self._face_cache.items() if n != name
+            }
+        return result
 
     # ------------------------------------------------------------------
     # MJPEG streaming
@@ -269,6 +316,8 @@ class DetectionEngine:
                 conf = self._confidence
                 show_labels = self._show_labels
                 show_conf = self._show_confidence
+                face_enabled = self._face_recognition_enabled
+                face_tolerance = self._face_recognition_tolerance
 
             if cap is None:
                 break
@@ -301,9 +350,26 @@ class DetectionEngine:
                     if track_id >= 0:
                         seen_ids.add(track_id)
 
+                    # Face recognition (cached per track_id)
+                    recognized_name = None
+                    if face_enabled and track_id >= 0:
+                        if track_id in self._face_cache:
+                            recognized_name = self._face_cache[track_id]
+                        else:
+                            # Crop person region and attempt recognition
+                            h, w = frame.shape[:2]
+                            cx1 = max(0, x1)
+                            cy1 = max(0, y1)
+                            cx2 = min(w, x2)
+                            cy2 = min(h, y2)
+                            if cx2 > cx1 and cy2 > cy1:
+                                crop = frame[cy1:cy2, cx1:cx2]
+                                recognized_name = self._face_db.recognize(crop, tolerance=face_tolerance)
+                            self._face_cache[track_id] = recognized_name
+
                     people_count += 1
                     color = _COLORS[track_id % len(_COLORS)]
-                    self._draw_detection(frame, x1, y1, x2, y2, color, track_id, confidence, show_labels, show_conf)
+                    self._draw_detection(frame, x1, y1, x2, y2, color, track_id, confidence, show_labels, show_conf, recognized_name)
 
             # Encode frame to JPEG
             _, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -337,7 +403,7 @@ class DetectionEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _draw_detection(frame, x1, y1, x2, y2, color, track_id, confidence, show_labels, show_conf):
+    def _draw_detection(frame, x1, y1, x2, y2, color, track_id, confidence, show_labels, show_conf, recognized_name=None):
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
         # corner accents
@@ -355,7 +421,7 @@ class DetectionEngine:
         if show_labels or show_conf:
             parts = []
             if show_labels:
-                parts.append(f"ID #{track_id}")
+                parts.append(recognized_name if recognized_name else f"ID #{track_id}")
             if show_conf:
                 parts.append(f"{confidence * 100:.1f}%")
             label = " | ".join(parts)
