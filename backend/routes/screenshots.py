@@ -22,4 +22,12 @@ def create_router(engine: DetectionEngine) -> APIRouter:
             return {"status": "error", "message": "Not found"}
         return FileResponse(path, media_type="image/jpeg")
 
+    @router.delete("/screenshots/{name}")
+    def delete_screenshot(name: str):
+        path = SCREENSHOT_DIR / name
+        if not path.exists() or not path.is_file():
+            return {"status": "error", "message": "Not found"}
+        path.unlink()
+        return {"status": "ok"}
+
     return router

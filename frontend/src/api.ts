@@ -2,8 +2,28 @@ import type { Stats, Settings, Screenshot, FacePerson } from "./types";
 
 const BASE = "/api";
 
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function json<T>(res: Promise<Response>): Promise<T> {
   const r = await res;
+  if (!r.ok) {
+    let msg = `Request failed (${r.status})`;
+    try {
+      const body = await r.json();
+      if (body.message) msg = body.message;
+      else if (body.detail) msg = body.detail;
+    } catch {
+      // use default message
+    }
+    throw new ApiError(r.status, msg);
+  }
   return r.json() as Promise<T>;
 }
 
@@ -23,6 +43,8 @@ export const updateSettings = (data: Partial<Settings>) =>
 // Screenshots
 export const takeScreenshot = () => json<{ status: string; filename?: string }>(fetch(`${BASE}/screenshot`, { method: "POST" }));
 export const fetchScreenshots = () => json<Screenshot[]>(fetch(`${BASE}/screenshots`));
+export const deleteScreenshot = (name: string) =>
+  json<{ status: string }>(fetch(`${BASE}/screenshots/${encodeURIComponent(name)}`, { method: "DELETE" }));
 
 // Faces
 export interface EnrollResult {
@@ -35,10 +57,6 @@ export interface EnrollResult {
 }
 export const fetchFaces = () => json<FacePerson[]>(fetch(`${BASE}/faces`));
 export const fetchGpuInfo = () => json<{ has_gpu: boolean }>(fetch(`${BASE}/faces/gpu`));
-export const enrollFaceFromCamera = (name: string, cpuOnly = false) =>
-  json<EnrollResult>(
-    fetch(`${BASE}/faces/enroll`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, cpu_only: cpuOnly }) })
-  );
 export const uploadFacePhoto = (name: string, file: File, cpuOnly = false) => {
   const form = new FormData();
   form.append("name", name);
