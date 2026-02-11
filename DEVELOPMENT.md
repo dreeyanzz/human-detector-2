@@ -58,13 +58,15 @@ The Vite dev server starts on `http://localhost:5173` and proxies `/api/*` reque
 backend/
 ├── app.py              # FastAPI setup, route registration, static file serving
 ├── detector.py          # DetectionEngine class -- the core of the application
+├── face_db.py           # FaceDatabase class -- face encoding storage, enrollment, recognition
 └── routes/
     ├── __init__.py
     ├── stream.py        # GET /api/stream -- MJPEG video
     ├── controls.py      # POST /api/start, /api/pause, /api/stop
     ├── stats.py         # GET /api/stats
     ├── settings.py      # GET/PUT /api/settings
-    └── screenshots.py   # Screenshot capture and serving
+    ├── screenshots.py   # Screenshot capture and serving
+    └── faces.py         # Face enrollment, listing, deletion, export/import
 ```
 
 **Key file: `detector.py`**
@@ -75,6 +77,16 @@ This is where all the detection logic lives. The `DetectionEngine` class manages
 - Frame annotation (bounding boxes, labels)
 - JPEG encoding for MJPEG streaming
 - Thread-safe state for stats, settings, and frames
+- Async face recognition via `ProcessPoolExecutor` (delegates to `face_db.py`)
+
+**Key file: `face_db.py`**
+
+Houses the `FaceDatabase` class and recognition worker function. Manages:
+- Persistent face encoding storage (`face_db.pkl` via pickle)
+- Face enrollment from images (detect face, compute 128-d encoding, store)
+- Face recognition (compare encodings against enrolled database)
+- GPU/CPU detection model selection with automatic HOG fallback
+- Export/import of the face database for backup and transfer
 
 ### Frontend
 
@@ -83,18 +95,21 @@ frontend/src/
 ├── main.tsx             # React entry point
 ├── App.tsx              # Root component, wires hooks to components
 ├── api.ts               # Fetch wrappers for all /api endpoints
-├── types.ts             # TypeScript interfaces (Stats, Settings, Screenshot)
+├── types.ts             # TypeScript interfaces (Stats, Settings, Screenshot, FacePerson)
 ├── index.css            # Tailwind imports
 ├── hooks/
 │   ├── useStats.ts      # Polls GET /api/stats every 500ms
-│   └── useSettings.ts   # Fetches + optimistically updates settings
+│   ├── useSettings.ts   # Fetches + optimistically updates settings
+│   └── useFaces.ts      # Fetches enrolled face list, provides refresh
 └── components/
     ├── Layout.tsx            # Page shell: header + responsive grid
     ├── VideoFeed.tsx         # MJPEG <img> tag
     ├── ControlBar.tsx        # Start / Pause / Stop / Screenshot buttons
     ├── StatsPanel.tsx        # 4 stat cards
-    ├── SettingsPanel.tsx     # Confidence slider, model radio, toggles
-    └── ScreenshotGallery.tsx # Expandable screenshot thumbnail grid
+    ├── SettingsPanel.tsx     # Confidence slider, model radio, toggles, face recognition
+    ├── ScreenshotGallery.tsx # Expandable screenshot thumbnail grid
+    ├── FacePanel.tsx         # Face enrollment, listing, export/import, GPU status
+    └── ui/                   # Shared UI primitives (Modal, Toast, Spinner, etc.)
 ```
 
 ### Root Files
@@ -252,6 +267,50 @@ Create `backend/routes/zones.py` with GET/PUT for zone configuration.
 
 Create a `ZoneEditor` component that draws rectangles on the video canvas overlay.
 
+## Face Recognition Architecture
+
+Face recognition runs alongside YOLO detection. Here's how the pieces fit together:
+
+### Data Flow
+
+```
+Enrollment:
+  Upload photo → PIL decode + EXIF fix → resize (max 800px)
+    → face_recognition.face_locations (CNN or HOG)
+    → face_recognition.face_encodings → 128-d vector
+    → stored in FaceDatabase._encodings dict → pickled to face_db.pkl
+
+Live Recognition:
+  Detection loop spots a person (track_id) → crop bounding box region
+    → submit to ThreadPoolExecutor → ThreadPool calls ProcessPoolExecutor
+    → _recognize_worker: detect face, encode, compare against all stored encodings
+    → face_distance() → best match within tolerance → cache result by track_id
+```
+
+### Key Design Decisions
+
+- **ProcessPoolExecutor** -- Face recognition runs in a separate process to isolate native dlib crashes from the main detection thread. If the worker process crashes 3 times, face recognition is automatically disabled for the session.
+- **Track ID caching** -- Once a face is recognized for a given track ID, the result is cached. The system won't re-recognize the same tracked person.
+- **Retry with cooldown** -- If recognition fails (no face detected in the crop), the system retries up to `_face_max_retries` times with a cooldown interval between attempts.
+- **GPU/CPU fallback** -- Enrollment tries CNN (GPU) first, then falls back to HOG (CPU) if GPU fails. The frontend prompts the user to continue with CPU when GPU fails mid-batch.
+- **Tolerance** -- The `face_recognition_tolerance` setting (0.3--0.8) controls the maximum Euclidean distance between face encodings to consider a match.
+
+### Files Involved
+
+| File | Role |
+|------|------|
+| `backend/face_db.py` | `FaceDatabase` class, `_recognize_worker` function, GPU detection |
+| `backend/detector.py` | Integrates face recognition into the detection loop, manages async dispatch |
+| `backend/routes/faces.py` | REST endpoints for enrollment, listing, deletion, export/import |
+| `frontend/src/components/FacePanel.tsx` | Enrollment UI, drag-and-drop, GPU status, export/import buttons |
+| `frontend/src/components/SettingsPanel.tsx` | Face recognition toggle and tolerance slider |
+| `frontend/src/hooks/useFaces.ts` | Fetches enrolled face list |
+| `frontend/src/api.ts` | `uploadFacePhoto`, `deleteFace`, `fetchGpuInfo`, `exportFaceDb`, `importFaceDb` |
+
+### Persistence
+
+Face encodings are stored in `faces/face_db.pkl` (relative to the writable directory). The file is a pickled `dict[str, list[np.ndarray]]` mapping person names to lists of 128-d float arrays. The file is deleted when the last person is removed.
+
 ## Debugging
 
 ### Backend Logs
@@ -317,6 +376,13 @@ There is no automated test suite. Manual testing checklist:
 7. Pause/Resume -- Video freezes/unfreezes
 8. Stop -- Session summary stats shown
 9. Resize browser -- Layout adapts (sidebar moves below video on small screens)
+10. Enroll a face -- Type a name, drop a photo, confirm it appears in the enrolled list
+11. Enable face recognition in Settings -- Recognized names appear on bounding boxes
+12. Adjust tolerance slider -- Matching strictness changes
+13. Delete an enrolled person -- Confirm removal via the confirmation dialog
+14. Export face DB -- Downloads `face_db.pkl`
+15. Import face DB -- Upload a previously exported `.pkl`, confirm faces merge correctly
+16. GPU status badge -- Shows "GPU" (green) or "CPU" (yellow) correctly
 
 ## Dependencies
 
@@ -328,6 +394,8 @@ There is no automated test suite. Manual testing checklist:
 | `opencv-python` | Camera capture, image processing, drawing |
 | `fastapi` | Web framework for the API |
 | `uvicorn` | ASGI server to run FastAPI |
+| `face_recognition` | Face detection and 128-d encoding (wraps dlib) |
+| `python-multipart` | Multipart form parsing for file uploads |
 
 ### Frontend (package.json)
 

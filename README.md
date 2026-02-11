@@ -9,6 +9,7 @@ Real-time person detection and tracking powered by YOLOv8. A modern web applicat
 - **Adjustable Settings** -- Confidence threshold slider, model selection (fast vs. accurate), display toggles
 - **Screenshot Capture** -- Save annotated frames as JPEG with one click, browse in a built-in gallery
 - **Session Statistics** -- Live people count, total unique individuals, FPS, and session duration
+- **Face Recognition** -- Enroll people by photo, identify them by name in the live feed, export/import face databases
 - **Standalone Distribution** -- Package as a single-folder Windows executable -- no installs required for customers
 
 ## Quick Start
@@ -59,6 +60,7 @@ human-detector-2/
 
 | Document | Description |
 |----------|-------------|
+| [USER_GUIDE.md](USER_GUIDE.md) | End-user guide -- interface walkthrough, features, troubleshooting |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System design, data flow, threading model, design decisions |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Developer setup, how to add features, debugging guide |
 | [API.md](API.md) | Full REST API reference with examples |
